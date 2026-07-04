@@ -1,0 +1,65 @@
+name: ai-fix
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream tag the patches must apply against"
+        required: true
+        type: string
+      failing_patch:
+        description: "Filename of the patch that failed (e.g. 0004-remove-sso-user-gate.patch)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout libre repo
+        uses: actions/checkout@v5
+
+      - name: Set up Node (for the Claude Code CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Install uv (for verify.sh)
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.8"
+
+      - name: Regenerate the failing patch
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: scripts/ai-fix.sh "${{ inputs.upstream_tag }}" "${{ inputs.failing_patch }}"
+
+      - name: Open PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: ai-fix/${{ inputs.upstream_tag }}-${{ inputs.failing_patch }}
+          title: "ai-fix: refresh ${{ inputs.failing_patch }} for ${{ inputs.upstream_tag }}"
+          body: |
+            Automatically regenerated patch after upstream drift.
+
+            Upstream tag: `${{ inputs.upstream_tag }}`
+            Failing patch: `${{ inputs.failing_patch }}`
+
+            The `scripts/ai-fix.sh` invocation already re-ran the full
+            strip + apply + verify pipeline against a fresh checkout, so
+            the patch is known to apply and pass verify.sh. Human review
+            is still required; nothing touching SSO or license gates
+            should auto-merge.
+          add-paths: |
+            patches/${{ inputs.failing_patch }}
+          labels: |
+            ai-fix
+            patch-drift

@@ -1,0 +1,4 @@
+0001-pyproject-drop-enterprise.patch
+0002-dockerfiles-drop-enterprise.patch
+0003-build-admin-ui-drop-enterprise.patch
+0004-remove-sso-user-gate.patch

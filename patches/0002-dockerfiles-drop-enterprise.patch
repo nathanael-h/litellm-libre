@@ -1,0 +1,69 @@
+diff --git a/Dockerfile b/Dockerfile
+index b6fef1a..f263fed 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -55,7 +55,6 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+ 
+ # Copy dependency metadata first for layer caching
+ COPY pyproject.toml uv.lock ./
+-COPY enterprise/pyproject.toml enterprise/
+ COPY litellm-proxy-extras/pyproject.toml litellm-proxy-extras/
+ 
+ # Install third-party dependencies (cached unless pyproject.toml/uv.lock change)
+@@ -110,10 +109,6 @@ COPY --from=builder /app/.venv /app/.venv
+ COPY --from=builder /app/docker /app/docker
+ COPY --from=builder /app/schema.prisma /app/schema.prisma
+ COPY --from=builder /app/litellm/proxy/prisma_migration.py /app/litellm/proxy/prisma_migration.py
+-# enterprise/ is imported by source path at runtime (proxy_cli puts the
+-# working directory on sys.path; litellm/proxy/hooks resolves
+-# enterprise.enterprise_hooks from it)
+-COPY --from=builder /app/enterprise /app/enterprise
+ # Prisma binaries live in $HOME/.cache (default prisma-python location),
+ # which is /root/.cache here. Copy only the Prisma subdirs — copying the
+ # whole /root/.cache drags in the uv build cache (~660 MB, includes a
+diff --git a/docker/Dockerfile.database b/docker/Dockerfile.database
+index b3af953..e0c38dd 100644
+--- a/docker/Dockerfile.database
++++ b/docker/Dockerfile.database
+@@ -53,7 +53,6 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+ 
+ # Copy dependency metadata first for layer caching
+ COPY pyproject.toml uv.lock ./
+-COPY enterprise/pyproject.toml enterprise/
+ COPY litellm-proxy-extras/pyproject.toml litellm-proxy-extras/
+ 
+ # Install third-party dependencies (cached unless pyproject.toml/uv.lock change)
+@@ -107,10 +106,6 @@ COPY --from=builder /app/.venv /app/.venv
+ COPY --from=builder /app/docker /app/docker
+ COPY --from=builder /app/schema.prisma /app/schema.prisma
+ COPY --from=builder /app/litellm/proxy/prisma_migration.py /app/litellm/proxy/prisma_migration.py
+-# enterprise/ is imported by source path at runtime (proxy_cli puts the
+-# working directory on sys.path; litellm/proxy/hooks resolves
+-# enterprise.enterprise_hooks from it)
+-COPY --from=builder /app/enterprise /app/enterprise
+ # Prisma binaries live in $HOME/.cache (default prisma-python location),
+ # which is /root/.cache here. Copy them from the builder so they survive
+ # deployments that volume-mount /app/.cache (e.g. readOnlyRootFilesystem
+diff --git a/docker/Dockerfile.non_root b/docker/Dockerfile.non_root
+index c24cb90..0b884f0 100644
+--- a/docker/Dockerfile.non_root
++++ b/docker/Dockerfile.non_root
+@@ -59,7 +59,6 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
+ 
+ # Copy dependency metadata first for layer caching
+ COPY pyproject.toml uv.lock ./
+-COPY enterprise/pyproject.toml enterprise/
+ COPY litellm-proxy-extras/pyproject.toml litellm-proxy-extras/
+ 
+ # Install third-party dependencies (cached unless pyproject.toml/uv.lock change)
+@@ -133,10 +132,6 @@ COPY --from=builder /app/.venv /app/.venv
+ COPY --from=builder /app/docker /app/docker
+ COPY --from=builder /app/schema.prisma /app/schema.prisma
+ COPY --from=builder /app/litellm/proxy/prisma_migration.py /app/litellm/proxy/prisma_migration.py
+-# enterprise/ is imported by source path at runtime (proxy_cli puts the
+-# working directory on sys.path; litellm/proxy/hooks resolves
+-# enterprise.enterprise_hooks from it)
+-COPY --from=builder /app/enterprise /app/enterprise
+ COPY --from=builder /app/.cache /app/.cache
+ COPY --from=builder /var/lib/litellm/ui /var/lib/litellm/ui
+ COPY --from=builder /var/lib/litellm/assets /var/lib/litellm/assets

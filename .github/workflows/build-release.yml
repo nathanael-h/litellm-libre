@@ -1,0 +1,168 @@
+name: build-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream LiteLLM tag to build (e.g. v1.92.0-stable)"
+        required: true
+        type: string
+      libre_counter:
+        description: "Libre counter suffix (defaults to 1)"
+        required: false
+        type: string
+        default: "1"
+
+permissions:
+  contents: write
+  packages: write
+  issues: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      failed_step: ${{ steps.trace.outputs.failed_step }}
+      failed_patch: ${{ steps.trace.outputs.failed_patch }}
+      reject_content: ${{ steps.trace.outputs.reject_content }}
+    steps:
+      - name: Checkout libre repo
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.8"
+
+      - name: Fetch upstream tag
+        id: fetch
+        run: scripts/fetch-upstream.sh "${{ inputs.upstream_tag }}" ./build
+
+      - name: Strip enterprise tree
+        id: strip
+        run: scripts/strip-enterprise.sh ./build
+
+      - name: Apply libre patches
+        id: apply
+        run: scripts/apply-patches.sh ./build
+
+      - name: Verify (static + import)
+        id: verify
+        run: scripts/verify.sh ./build
+
+      - name: Build wheel + sdist
+        id: uvbuild
+        env:
+          BUILD_DOCKER: "0"
+        run: |
+          upstream="${{ inputs.upstream_tag }}"
+          base="${upstream#v}"; base="${base%-stable}"
+          libre_ver="${base}+libre.${{ inputs.libre_counter }}"
+          scripts/build.sh ./build "$libre_ver"
+          echo "libre_ver=$libre_ver" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./build
+          file: ./build/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.uvbuild.outputs.libre_ver }}
+            ghcr.io/${{ github.repository }}:stable
+            ghcr.io/${{ github.repository }}:latest
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.uvbuild.outputs.libre_ver }}
+          name: v${{ steps.uvbuild.outputs.libre_ver }}
+          body: |
+            Libre build of BerriAI/litellm@${{ inputs.upstream_tag }} with the
+            proprietary enterprise tree stripped and the SSO user-count gate removed.
+            See PLAN.md for the patch set applied.
+          files: ./build/dist/*
+
+      - name: Update UPSTREAM
+        run: |
+          echo "${{ inputs.upstream_tag }}" > UPSTREAM
+          git config user.name  libre-bot
+          git config user.email libre-bot@users.noreply.github.com
+          git add UPSTREAM
+          git diff --cached --quiet || git commit -m "chore: track ${{ inputs.upstream_tag }}"
+          git push
+
+      - name: Capture failure context
+        id: trace
+        if: failure()
+        run: |
+          failed=""
+          for step in fetch strip apply verify uvbuild; do
+            outcome="${{ toJson(steps) }}"
+            :
+          done
+          # The step outcomes are exposed via `steps.<id>.outcome` — pick the
+          # first that isn't "success" or empty.
+          {
+            echo "failed_step=${{ steps.apply.outcome == 'failure' && 'apply' ||
+                                   steps.verify.outcome == 'failure' && 'verify' ||
+                                   steps.strip.outcome == 'failure' && 'strip' ||
+                                   steps.fetch.outcome == 'failure' && 'fetch' ||
+                                   steps.uvbuild.outcome == 'failure' && 'build' || 'unknown' }}"
+            if [ -d ./build/.libre-rejects ]; then
+              echo 'reject_content<<REJEOF'
+              find ./build/.libre-rejects -type f -print -exec sh -c 'echo "===== {} ====="; cat "{}"' \;
+              echo REJEOF
+            else
+              echo 'reject_content=(no rejects captured)'
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+  open-drift-issue:
+    needs: build
+    if: failure()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Open (or update) patch-drift issue
+        uses: actions/github-script@v8
+        env:
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          FAILED_STEP:  ${{ needs.build.outputs.failed_step }}
+          REJECTS:      ${{ needs.build.outputs.reject_content }}
+        with:
+          script: |
+            const title = `patch drift: build failed at ${process.env.UPSTREAM_TAG}`;
+            const body = [
+              `Upstream tag: **${process.env.UPSTREAM_TAG}**`,
+              `Failed step: **${process.env.FAILED_STEP}**`,
+              ``,
+              `Reject content / build tail:`,
+              '```',
+              process.env.REJECTS || '(none)',
+              '```',
+              ``,
+              `Trigger \`ai-fix.yml\` (workflow dispatch) once a human confirms the`,
+              `patch needs regeneration.`,
+            ].join('\n');
+            const q = `repo:${context.repo.owner}/${context.repo.repo} in:title is:issue is:open label:patch-drift`;
+            const found = await github.rest.search.issuesAndPullRequests({ q });
+            const existing = found.data.items.find(i => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: existing.number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['patch-drift'],
+              });
+            }
