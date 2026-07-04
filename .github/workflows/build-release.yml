@@ -57,9 +57,13 @@ jobs:
         run: |
           upstream="${{ inputs.upstream_tag }}"
           base="${upstream#v}"; base="${base%-stable}"
+          # PEP 440 local-version segment ('+') for the Python wheel/sdist.
           libre_ver="${base}+libre.${{ inputs.libre_counter }}"
+          # Docker/OCI tags and git refs forbid '+', so use '-' there instead.
+          docker_tag="${base}-libre.${{ inputs.libre_counter }}"
           scripts/build.sh ./build "$libre_ver"
-          echo "libre_ver=$libre_ver" >> "$GITHUB_OUTPUT"
+          echo "libre_ver=$libre_ver"   >> "$GITHUB_OUTPUT"
+          echo "docker_tag=$docker_tag" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -75,15 +79,15 @@ jobs:
           file: ./build/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:${{ steps.uvbuild.outputs.libre_ver }}
+            ghcr.io/${{ github.repository }}:${{ steps.uvbuild.outputs.docker_tag }}
             ghcr.io/${{ github.repository }}:stable
             ghcr.io/${{ github.repository }}:latest
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.uvbuild.outputs.libre_ver }}
-          name: v${{ steps.uvbuild.outputs.libre_ver }}
+          tag_name: v${{ steps.uvbuild.outputs.docker_tag }}
+          name: v${{ steps.uvbuild.outputs.docker_tag }}
           body: |
             Libre build of BerriAI/litellm@${{ inputs.upstream_tag }} with the
             proprietary enterprise tree stripped and the SSO user-count gate removed.
