@@ -16,22 +16,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Find latest upstream -stable tag
+      - name: Find latest upstream stable tag
         id: find
         uses: actions/github-script@v8
         with:
           script: |
-            const { data: tags } = await github.rest.repos.listTags({
-              owner: 'BerriAI',
-              repo: 'litellm',
-              per_page: 100,
-            });
-            const stable = tags.map(t => t.name).filter(n => /^v\d+\.\d+\.\d+-stable$/.test(n));
+            // Upstream stable tags come in two shapes:
+            //   - new scheme (>= 1.84.0): plain SemVer, e.g. "v1.91.0" / "v1.91.1" (hotfix)
+            //   - old scheme (<= 1.83.x): the "-stable" suffix, e.g. "v1.83.14-stable"
+            // Pre-releases (-rc.N, -dev.N, -nightly) and old Docker-only hotfixes
+            // (-stable.patch.N) are NOT stable and must be excluded.
+            // https://docs.litellm.ai/docs/proxy/release_cycle
+            const isStable = n => /^v\d+\.\d+\.\d+(-stable)?$/.test(n);
+            // Paginate: frequent dev/rc tags can push a stable off the first page.
+            const maxPages = 5, perPage = 100;
+            const stable = [];
+            for (let page = 1; page <= maxPages; page++) {
+              const { data: tags } = await github.rest.repos.listTags({
+                owner: 'BerriAI', repo: 'litellm', per_page: perPage, page,
+              });
+              stable.push(...tags.map(t => t.name).filter(isStable));
+              if (tags.length < perPage) break;
+            }
             if (stable.length === 0) {
-              core.setFailed('no upstream -stable tag matched v*-stable');
+              core.setFailed('no upstream stable tag matched vX.Y.Z or vX.Y.Z-stable');
               return;
             }
-            const sortKey = n => n.slice(1, -('-stable'.length)).split('.').map(Number);
+            const sortKey = n => n.replace(/^v/, '').replace(/-stable$/, '').split('.').map(Number);
             stable.sort((a, b) => {
               const av = sortKey(a);
               const bv = sortKey(b);

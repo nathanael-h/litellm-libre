@@ -35,12 +35,15 @@ if grep -rnE 'billable_users.*>' litellm/proxy/management_endpoints/ui_sso.py; t
 fi
 
 # Runtime checks. Use uv if available; fall back to plain python.
+# litellm does not expose litellm.__version__; the installed version lives in
+# package metadata. Assert the module imports and report the metadata version.
+ver_check='import litellm, importlib.metadata as m; print("litellm", m.version("litellm"))'
 if command -v uv >/dev/null 2>&1; then
     uv sync --frozen --no-install-workspace --extra proxy --python python3
-    uv run python -c 'import litellm; print("litellm", litellm.__version__)'
+    uv run python -c "$ver_check"
     uv run python litellm/proxy/proxy_cli.py --help >/dev/null
 else
-    python -c 'import litellm; print("litellm", litellm.__version__)'
+    python -c "$ver_check"
     python litellm/proxy/proxy_cli.py --help >/dev/null
 fi
 
