@@ -24,13 +24,21 @@ for path in enterprise litellm/proxy/enterprise tests/enterprise; do
     fi
 done
 
+# strip-enterprise.sh de-enterprises pyproject.toml (formerly patch 0001);
+# assert nothing enterprise survived into the packaging metadata.
+if grep -q 'litellm-enterprise' pyproject.toml; then
+    fail 'litellm-enterprise still referenced in pyproject.toml'
+fi
+
 if grep -rnE '^(from|import) litellm_enterprise' litellm/ >/tmp/libre-unguarded.txt; then
     printf 'verify: unguarded litellm_enterprise imports found in litellm/:\n' >&2
     cat /tmp/libre-unguarded.txt >&2
     fail 'unguarded enterprise imports'
 fi
 
-if grep -rnE 'billable_users.*>' litellm/proxy/management_endpoints/ui_sso.py; then
+# The SSO free-tier gate counts users (billable_users on older upstreams,
+# total_users on newer) and refuses SSO past the limit; patch 0004 removes it.
+if grep -rnE '(billable_users|total_users).*>' litellm/proxy/management_endpoints/ui_sso.py; then
     fail 'SSO user-count gate is still present in ui_sso.py'
 fi
 

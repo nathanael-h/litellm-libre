@@ -65,13 +65,12 @@ litellm-libre/
 ├── UPSTREAM                       # single line: the last upstream tag we built, e.g. v1.92.0-stable
 ├── patches/
 │   ├── series                     # ordered list of patches to apply
-│   ├── 0001-pyproject-drop-enterprise.patch
 │   ├── 0002-dockerfiles-drop-enterprise.patch
 │   ├── 0003-build-admin-ui-drop-enterprise.patch
 │   └── 0004-remove-sso-user-gate.patch
 ├── scripts/
 │   ├── fetch-upstream.sh          # clone/checkout a given upstream tag into ./build
-│   ├── strip-enterprise.sh        # bulk file/dir removals (rm the tree, symlink, tests copy)
+│   ├── strip-enterprise.sh        # rm enterprise tree/symlink/tests copy + de-enterprise pyproject.toml
 │   ├── apply-patches.sh           # git apply --3way each patch in series; collect rejects
 │   ├── build.sh                   # uv build (wheel+sdist) and docker build
 │   └── verify.sh                  # smoke test: import litellm, boot proxy --help, run a curl
@@ -79,48 +78,45 @@ litellm-libre/
     ├── ISSUE_TEMPLATE/
     │   └── patch-drift.md
     └── workflows/
-        ├── watch-upstream.yml     # scheduled: detect new -stable tag, dispatch build
+        ├── watch-upstream.yml     # scheduled: detect new stable tag, dispatch build
         ├── build-release.yml      # apply patches, build, publish; open issue on failure
         └── ai-fix.yml             # manual/dispatch: LLM-assisted patch refresh -> PR
 ```
 
 Rationale for patches-onto-checkout rather than a fork branch: the lite repo stays tiny and
-every deviation from upstream is a reviewable `.patch` file. Bulk deletions (the whole
-`enterprise/` tree, the symlink, the `tests/enterprise/` copy) are done by
-`strip-enterprise.sh` rather than a giant patch, because a patch that deletes hundreds of
-files is unreadable and brittle. Patches are reserved for the small, semantically meaningful
-text edits.
+every deviation from upstream is a reviewable `.patch` file. But patches are context matches,
+so an edit whose anchor lines change every release drifts and fails to apply constantly. Two
+kinds of change are therefore done by `strip-enterprise.sh` (pattern-based, not patches)
+instead: bulk deletions (the whole `enterprise/` tree, the symlink, the `tests/enterprise/`
+copy — a diff deleting hundreds of files is unreadable) and the `pyproject.toml` packaging
+edits (which carry the per-release `litellm-enterprise==X.Y.Z` version pin). Patches are
+reserved for the small, semantically meaningful text edits that live in stable code.
 
 ## The patch set
 
-Four patches plus one removal script. Text edits below are the exact current lines, so the
-patches are ready to author.
+Three patches plus one strip script. The strip script handles everything that would drift on
+routine version bumps; the patches touch code that only changes on real upstream refactors.
 
-### strip-enterprise.sh (removals, not a patch)
+### strip-enterprise.sh (removals + pyproject edits, not patches)
 
-```sh
-#!/usr/bin/env sh
-set -eu
-root="${1:?usage: strip-enterprise.sh <checkout-dir>}"
-rm -rf   "$root/enterprise"
-rm -f    "$root/litellm/proxy/enterprise"      # dangling symlink
-rm -rf   "$root/tests/enterprise"
-```
+Removes the proprietary tree and de-enterprises the packaging metadata:
 
-`verify.sh` should assert none of these paths exist afterward and that
-`grep -rn "^from litellm_enterprise\|^import litellm_enterprise" "$root/litellm/"` is empty
-(guarding against upstream adding a new unguarded import).
+- `rm -rf enterprise/`, the `litellm/proxy/enterprise` symlink, and `tests/enterprise/`
+- `pyproject.toml`, by pattern (version-independent):
+  - delete the `"litellm-enterprise==X.Y.Z"` dependency line
+  - delete the `litellm-enterprise = { workspace = true }` uv source
+  - drop `"enterprise"` from the `members = [...]` uv workspace array
+  - delete the `"litellm/proxy/enterprise"` `source-exclude` entry
 
-### 0001-pyproject-drop-enterprise.patch
+It asserts afterward that no `litellm-enterprise` reference survives, so an upstream layout
+change fails the build loudly instead of silently shipping the proprietary dependency. This
+replaces the former `0001-pyproject-drop-enterprise.patch`, which re-drifted on nearly every
+weekly release because its context embedded the exact dependency versions.
 
-Remove the dependency, the workspace source, the workspace member, and the source-exclude
-entry.
-
-- delete line 66: `"litellm-enterprise==0.1.46",`
-- delete line 256: `litellm-enterprise = { workspace = true }`
-- change line 259: `members = ["enterprise", "litellm-proxy-extras"]`
-  to `members = ["litellm-proxy-extras"]`
-- delete line 264: `"litellm/proxy/enterprise",` from `source-exclude`
+`verify.sh` independently re-asserts the removed paths are gone, that `pyproject.toml` has no
+`litellm-enterprise` reference, and that
+`grep -rnE '^(from|import) litellm_enterprise' litellm/` is empty (guarding against upstream
+adding a new unguarded import).
 
 ### 0002-dockerfiles-drop-enterprise.patch
 
