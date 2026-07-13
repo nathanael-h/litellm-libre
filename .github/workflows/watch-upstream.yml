@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   actions: write
+  issues: read
 
 jobs:
   detect:
@@ -69,10 +70,24 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
+            const { owner, repo } = context.repo;
+            const tag = '${{ steps.compare.outputs.latest }}';
+            // Don't re-dispatch a tag we already know is broken. UPSTREAM only
+            // advances on a *successful* build, so a build that fails at `apply`
+            // leaves UPSTREAM behind and this cron would otherwise re-dispatch
+            // the same doomed build every 6h, piling identical failure comments
+            // onto the drift issue. An open patch-drift issue for this tag means
+            // a human still owes a patch refresh; skip until they close it.
+            const title = `patch drift: build failed at ${tag}`;
+            const q = `repo:${owner}/${repo} in:title is:issue is:open label:patch-drift`;
+            const found = await github.rest.search.issuesAndPullRequests({ q });
+            if (found.data.items.some(i => i.title === title)) {
+              core.info(`Open patch-drift issue already exists for ${tag}; skipping dispatch.`);
+              return;
+            }
             await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
+              owner, repo,
               workflow_id: 'build-release.yml',
               ref: context.ref,
-              inputs: { upstream_tag: '${{ steps.compare.outputs.latest }}' },
+              inputs: { upstream_tag: tag },
             });

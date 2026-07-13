@@ -23,8 +23,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       failed_step: ${{ steps.trace.outputs.failed_step }}
-      failed_patch: ${{ steps.trace.outputs.failed_patch }}
-      reject_content: ${{ steps.trace.outputs.reject_content }}
+      diagnostics: ${{ steps.trace.outputs.diagnostics }}
     steps:
       - name: Checkout libre repo
         uses: actions/checkout@v5
@@ -89,9 +88,29 @@ jobs:
           tag_name: v${{ steps.uvbuild.outputs.docker_tag }}
           name: v${{ steps.uvbuild.outputs.docker_tag }}
           body: |
-            Libre build of BerriAI/litellm@${{ inputs.upstream_tag }} with the
-            proprietary enterprise tree stripped and the SSO user-count gate removed.
-            See PLAN.md for the patch set applied.
+            Libre (MIT-only) build of [BerriAI/litellm@${{ inputs.upstream_tag }}](https://github.com/BerriAI/litellm/releases/tag/${{ inputs.upstream_tag }})
+            with the proprietary `enterprise/` tree stripped and the SSO user-count gate removed.
+
+            **Artifacts**
+            - Python: `${{ steps.uvbuild.outputs.libre_ver }}` — wheel + sdist attached below
+            - Docker: `ghcr.io/${{ github.repository }}:${{ steps.uvbuild.outputs.docker_tag }}` (also tagged `:stable`, `:latest`)
+
+            **What changed vs upstream** — the enterprise runtime dependency and
+            packaging are removed, the enterprise Docker copies and admin-UI build
+            step are dropped, and the SSO free-tier user gate is removed. See
+            [PLAN.md](https://github.com/${{ github.repository }}/blob/main/PLAN.md)
+            for the exact patch set.
+
+            **Upstream changelog** — this build tracks upstream **${{ inputs.upstream_tag }}**;
+            for the features and fixes in the underlying release see the upstream
+            release notes: https://github.com/BerriAI/litellm/releases/tag/${{ inputs.upstream_tag }}
+
+            > ⚠️ **Enterprise features are not available.** The proprietary
+            > `litellm-enterprise` package is removed from this build, so anything
+            > upstream gates behind a LiteLLM Enterprise license or ships only in
+            > that package (enterprise hooks, custom admin-UI theming, license-gated
+            > SSO limits, etc.) is disabled or silently no-ops. The OSS core proxy
+            > and its features are unaffected.
           files: ./build/dist/*
 
       - name: Update UPSTREAM
@@ -107,26 +126,35 @@ jobs:
         id: trace
         if: failure()
         run: |
-          failed=""
-          for step in fetch strip apply verify uvbuild; do
-            outcome="${{ toJson(steps) }}"
-            :
-          done
-          # The step outcomes are exposed via `steps.<id>.outcome` — pick the
-          # first that isn't "success" or empty.
+          # First failing step, in pipeline order (steps.<id>.outcome).
+          echo "failed_step=${{ steps.apply.outcome == 'failure' && 'apply' ||
+                                 steps.verify.outcome == 'failure' && 'verify' ||
+                                 steps.strip.outcome == 'failure' && 'strip' ||
+                                 steps.fetch.outcome == 'failure' && 'fetch' ||
+                                 steps.uvbuild.outcome == 'failure' && 'build' || 'unknown' }}" \
+            >> "$GITHUB_OUTPUT"
+
+          # Diagnostics: the patch-apply failure log + rejected hunks if present,
+          # otherwise a pointer to the run log. Cap at ~50k so the issue body
+          # (GitHub limit 65536) can never overflow.
           {
-            echo "failed_step=${{ steps.apply.outcome == 'failure' && 'apply' ||
-                                   steps.verify.outcome == 'failure' && 'verify' ||
-                                   steps.strip.outcome == 'failure' && 'strip' ||
-                                   steps.fetch.outcome == 'failure' && 'fetch' ||
-                                   steps.uvbuild.outcome == 'failure' && 'build' || 'unknown' }}"
+            echo 'diagnostics<<REJEOF'
             if [ -d ./build/.libre-rejects ]; then
-              echo 'reject_content<<REJEOF'
-              find ./build/.libre-rejects -type f -print -exec sh -c 'echo "===== {} ====="; cat "{}"' \;
-              echo REJEOF
+              # Buffer to a file first, then head that file: piping straight into
+              # `head` would SIGPIPE the producer and fail the step under pipefail.
+              diag="$(mktemp)"
+              find ./build/.libre-rejects -type f | sort | while IFS= read -r f; do
+                printf '===== %s =====\n' "${f#./build/.libre-rejects/}"
+                cat "$f"
+                printf '\n'
+              done > "$diag"
+              head -c 50000 "$diag"
+              rm -f "$diag"
             else
-              echo 'reject_content=(no rejects captured)'
+              echo "(no patch rejects; failure was before/after the apply step -- see the run log)"
             fi
+            echo
+            echo REJEOF
           } >> "$GITHUB_OUTPUT"
 
   open-drift-issue:
@@ -140,33 +168,50 @@ jobs:
         env:
           UPSTREAM_TAG: ${{ inputs.upstream_tag }}
           FAILED_STEP:  ${{ needs.build.outputs.failed_step }}
-          REJECTS:      ${{ needs.build.outputs.reject_content }}
+          DIAGNOSTICS:  ${{ needs.build.outputs.diagnostics }}
         with:
           script: |
-            const title = `patch drift: build failed at ${process.env.UPSTREAM_TAG}`;
-            const body = [
-              `Upstream tag: **${process.env.UPSTREAM_TAG}**`,
-              `Failed step: **${process.env.FAILED_STEP}**`,
+            const { owner, repo } = context.repo;
+            const tag = process.env.UPSTREAM_TAG;
+            const step = process.env.FAILED_STEP || 'unknown';
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const title = `patch drift: build failed at ${tag}`;
+            // The report excludes the run URL so identical failures compare equal
+            // (see the dedup check below); the URL is appended separately.
+            const report = [
+              `Upstream tag: **${tag}**`,
+              `Failed step: **${step}**`,
               ``,
-              `Reject content / build tail:`,
+              `Diagnostics (failed patch, \`git apply\` errors, rejected hunks):`,
               '```',
-              process.env.REJECTS || '(none)',
+              (process.env.DIAGNOSTICS || '(none captured)').trim(),
               '```',
               ``,
-              `Trigger \`ai-fix.yml\` (workflow dispatch) once a human confirms the`,
-              `patch needs regeneration.`,
+              `Fix: regenerate the failing patch against \`${tag}\` (trigger`,
+              `\`ai-fix.yml\`, or do it by hand), open a PR, and merge. The next`,
+              `\`watch-upstream\` run will re-dispatch the build once this issue closes.`,
             ].join('\n');
-            const q = `repo:${context.repo.owner}/${context.repo.repo} in:title is:issue is:open label:patch-drift`;
+            const body = `${report}\n\n[Failed run log](${runUrl})`;
+
+            const q = `repo:${owner}/${repo} in:title is:issue is:open label:patch-drift`;
             const found = await github.rest.search.issuesAndPullRequests({ q });
             const existing = found.data.items.find(i => i.title === title);
-            if (existing) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: existing.number, body,
-              });
-            } else {
-              await github.rest.issues.create({
-                owner: context.repo.owner, repo: context.repo.repo,
-                title, body, labels: ['patch-drift'],
-              });
+            if (!existing) {
+              await github.rest.issues.create({ owner, repo, title, body, labels: ['patch-drift'] });
+              return;
             }
+            // Don't pile identical reports onto the same issue: only comment when
+            // the diagnostics changed since the last report (issue body or the
+            // most recent comment). The run-URL line is stripped before comparing.
+            const strip = s => (s || '').replace(/\n\n\[Failed run log\]\([^)]*\)\s*$/, '').trim();
+            const comments = await github.rest.issues.listComments({
+              owner, repo, issue_number: existing.number, per_page: 100,
+            });
+            const last = comments.data.length
+              ? comments.data[comments.data.length - 1].body
+              : existing.body;
+            if (strip(last) === strip(body)) {
+              core.info(`Identical drift report already on #${existing.number}; not commenting again.`);
+              return;
+            }
+            await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
